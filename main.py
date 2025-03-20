@@ -1,15 +1,15 @@
 import os
-import glob
 import asyncio
 import random
 import time
 
 from telethon import TelegramClient, events, functions
+from telethon.errors import FloodWaitError, RPCError
 
 # ========== [1] 텔레그램 API 설정 ==========
-API_ID = int(os.getenv("API_ID", "21946248"))
-API_HASH = os.getenv("API_HASH", "78c61b073bcaf43c2a03b472aae5199f")
-PHONE_NUMBER = os.getenv("PHONE_NUMBER", "+819016714809")  # 예시 번호
+API_ID = int(os.getenv("API_ID", "27565874"))
+API_HASH = os.getenv("API_HASH", "de8f48b4a95aceea0ed754f7bb3af0c3")
+PHONE_NUMBER = os.getenv("PHONE_NUMBER", "+821080133483")  # 예시
 
 SESSION_NAME = "my_telethon_session"
 client = TelegramClient(
@@ -20,38 +20,11 @@ client = TelegramClient(
     auto_reconnect=True
 )
 
-# ========== [2] 예: 여러 광고 텍스트/이미지 폴더 ==========
-AD_TEXTS_DIR = "ad_texts"
-AD_IMAGES_DIR = "ad_images"
+# ========== [2] 홍보용 계정(마케팅 계정) 설정 ==========
+#    - '@계정형식' 또는 숫자 ID 등
+MARKETING_USER = "@cuz_z"  # 예시
 
-# ========== [3] 랜덤 메시지/이미지 선택 함수 (선택사항) ==========
-def load_random_message():
-    """
-    ad_texts 폴더에 있는 .txt 파일 중 하나를 무작위로 골라 내용을 반환.
-    파일이 없다면 기본 문구 반환.
-    """
-    txt_files = glob.glob(os.path.join(AD_TEXTS_DIR, "*.txt"))
-    if not txt_files:
-        return "광고 문구가 없습니다."
-    choice_file = random.choice(txt_files)
-    with open(choice_file, "r", encoding="utf-8") as f:
-        return f.read().strip()
-
-def get_random_image():
-    """
-    ad_images 폴더에 있는 이미지 파일(.jpg, .png 등) 중 하나를 무작위로 반환.
-    없으면 None
-    """
-    img_patterns = ("*.jpg", "*.jpeg", "*.png", "*.gif")
-    img_files = []
-    for pattern in img_patterns:
-        img_files.extend(glob.glob(os.path.join(AD_IMAGES_DIR, pattern)))
-
-    if not img_files:
-        return None
-    return random.choice(img_files)
-
-# ========== [4] 연결/세션 확인 함수 ==========
+# ========== [3] 연결/세션 확인 함수 ==========
 async def ensure_connected():
     if not client.is_connected():
         print("[INFO] Telethon is disconnected. Reconnecting...")
@@ -62,10 +35,11 @@ async def ensure_connected():
         await client.start(phone=PHONE_NUMBER)
         print("[INFO] 재로그인(OTP) 완료")
 
-# ========== [5] keep_alive 함수 ==========
+# ========== [4] keep_alive 함수 ==========
 async def keep_alive():
     """
-    10분(600초)마다 호출하여 간단한 API 요청으로 Telethon 연결 상태 유지.
+    - 주기적으로(예: 10분 간격) 호출해 Telethon 연결 상태 점검
+    - 간단한 API 호출로 서버와 통신
     """
     try:
         await ensure_connected()
@@ -74,86 +48,111 @@ async def keep_alive():
     except Exception as e:
         print(f"[ERROR] keep_alive ping fail: {e}")
 
-# ========== [6] '내 계정'이 가입된 그룹/채널 불러오기 ==========
+# ========== [5] 그룹 목록 로드 ==========
 async def load_all_groups():
     await ensure_connected()
     dialogs = await client.get_dialogs()
-    return [d.id for d in dialogs if d.is_group or d.is_channel]
+    return [d.id for d in dialogs if (d.is_group or d.is_channel)]
 
-# ========== [7] 전송 로직:  
-#    - 그룹 리스트 무작위 섞기  
-#    - 10~20개씩 배치 전송 + 배치 내 그룹 간 5~15초 쉬기  
-#    - 배치 간 20분 쉬기  
-#    - 한 사이클 끝나면 40~50분 쉬기  
-#    - 반복  
-# =========================================
+# ========== [6] 홍보용 계정의 '최근 메시지' 가져오기 ==========
+async def get_last_message_from_user(user):
+    """
+    - user로부터 최근 메시지 1개(Telethon의 Message 객체) 불러오기
+    - 없으면 None 반환
+    """
+    try:
+        await ensure_connected()
+        msgs = await client.get_messages(user, limit=1)
+        if msgs:
+            return msgs[0]  # 가장 최근 메시지 객체
+        else:
+            return None
+    except RPCError as e:
+        print(f"[ERROR] get_last_message_from_user RPC 에러: {e}")
+        return None
+
+# ========== [7] 전체 그룹에 '최근 메시지'를 전달(Forward) ==========
+async def forward_ad_to_groups():
+    """
+    1) 홍보용 계정의 최근 메시지 1개를 가져오기
+    2) 그룹 리스트(전체) 불러오기
+    3) 그룹마다 forward_messages()
+    4) 그룹 간 딜레이 (원하는 만큼)
+    """
+    # (A) 최근 메시지 가져오기
+    last_msg = await get_last_message_from_user(MARKETING_USER)
+    if not last_msg:
+        print("[WARN] 홍보용 계정에서 메시지를 못 가져옴. 건너뜀.")
+        return
+
+    # (B) 그룹 리스트 가져오기
+    group_list = await load_all_groups()
+    if not group_list:
+        print("[WARN] 가입된 그룹이 없습니다.")
+        return
+
+    print(f"[INFO] 총 {len(group_list)}개 그룹에 홍보 메시지 전달 시작.")
+
+    # (C) 순차적 포워딩
+    for idx, grp_id in enumerate(group_list, start=1):
+        try:
+            # forward_messages(destination, message_ids, from_peer)
+            await client.forward_messages(grp_id, last_msg.id, from_peer=last_msg.sender_id)
+
+            print(f"[INFO] {idx}/{len(group_list)} → Forward 성공: {grp_id}")
+
+        except FloodWaitError as e:
+            print(f"[ERROR] FloodWait: {e}. 일정 시간 대기 후 재시도 필요.")
+            # 텔레그램에서 대기 시간(e.seconds)을 주는 경우, 그만큼 sleep 후 재시도 가능
+            await asyncio.sleep(e.seconds + 10)
+
+        except RPCError as e:
+            print(f"[ERROR] Forward RPCError(chat_id={grp_id}): {e}")
+
+        except Exception as e:
+            print(f"[ERROR] Forward 실패(chat_id={grp_id}): {e}")
+
+        # (C-1) 그룹 간 딜레이 (PLACEHOLDER)
+        #       필요에 따라 조정 (ex. 30~60초, 2~5분 등)
+        delay = 30  # 예시로 고정 30초 (직접 수정 필요)
+        # delay = random.randint(60, 120)  # 1~2분 랜덤 등
+        print(f"[INFO] 다음 그룹 전송까지 {delay}초 대기...")
+        await asyncio.sleep(delay)
+
+    print("[INFO] 모든 그룹 전송(Forward) 완료.")
+
+# ========== [8] 전송 사이클(반복) ==========
 async def send_messages_loop():
+    """
+    - 무한 루프
+    - forward_ad_to_groups() 실행
+    - 사이클 간 대기 (PLACEHOLDER)
+    """
     while True:
         try:
-            # (A) 그룹 목록 불러오기
             await ensure_connected()
-            group_list = await load_all_groups()
-            if not group_list:
-                print("[WARN] 가입된 그룹/채널이 없습니다. 10분 뒤 재시도합니다.")
-                await asyncio.sleep(600)
-                continue
 
-            # (B) 그룹 순서 무작위 섞기
-            random.shuffle(group_list)
+            # (1) 전체 그룹에 포워딩
+            await forward_ad_to_groups()
 
-            print(f"[INFO] 이번 사이클: 총 {len(group_list)}개 그룹 → 10~20개 배치씩 전송")
-
-            index = 0
-            while index < len(group_list):
-                # (1) 이번 배치 크기: 10 ~ 20 사이 랜덤
-                batch_size = random.randint(10, 20)
-                batch = group_list[index: index + batch_size]
-                if not batch:
-                    break
-
-                print(f"[INFO] 배치 전송 (index={index} ~ {index + len(batch) - 1}), 그룹 수={len(batch)}")
-
-                # (2) 배치 내 각 그룹에 전송
-                for grp_id in batch:
-                    text_msg = load_random_message()  # 랜덤 텍스트
-                    img_path = get_random_image()      # 랜덤 이미지
-
-                    try:
-                        if img_path:
-                            await client.send_file(grp_id, img_path, caption=text_msg)
-                            print(f"[INFO] (이미지+캡션) 전송 성공 → {grp_id}")
-                        else:
-                            await client.send_message(grp_id, text_msg)
-                            print(f"[INFO] (텍스트만) 전송 성공 → {grp_id}")
-                    except Exception as e:
-                        print(f"[ERROR] 전송 실패(chat_id={grp_id}): {e}")
-
-                    # (2-1) 배치 내 그룹 간 짧은 대기 (5~15초)
-                    small_delay = random.randint(5, 15)
-                    print(f"[INFO] 다음 그룹 전송까지 {small_delay}초 대기...")
-                    await asyncio.sleep(small_delay)
-
-                index += batch_size
-
-                # (3) 배치 간 대기: 20분(1200초)
-                print("[INFO] 이번 배치 전송 완료. 20분 대기 후 다음 배치로 넘어갑니다.")
-                await asyncio.sleep(1200)  # 20분
-
-            # (C) 한 사이클(모든 그룹) 끝났으니 40~50분 쉬기
-            rest_time = random.randint(2400, 3000)  # 40~50분(초 단위)
-            print(f"[INFO] 모든 그룹 전송 사이클 종료. {rest_time // 60}분 뒤 다음 사이클 시작.")
-            await asyncio.sleep(rest_time)
+            # (2) 사이클 간 대기 (PLACEHOLDER)
+            #     예: 3시간 대기
+            cycle_delay = 3 * 60 * 60  # 3시간
+            print(f"[INFO] 한 사이클 끝. {cycle_delay//3600}시간 대기 후 재시작.")
+            await asyncio.sleep(cycle_delay)
 
         except Exception as e:
             print(f"[ERROR] send_messages_loop() 에러: {e}")
             # 에러 시 잠시 대기 후 재시도
             await asyncio.sleep(600)
 
-# ========== [8] 메인 함수 ==========
+# ========== [9] 메인 함수 ==========
 async def main():
+    # 1) 텔레그램 연결
     await client.connect()
     print("[INFO] client.connect() 완료")
 
+    # 2) 세션 인증 여부
     if not (await client.is_user_authorized()):
         print("[INFO] 세션 없음 or 만료 → OTP 로그인 시도")
         await client.start(phone=PHONE_NUMBER)
@@ -167,18 +166,18 @@ async def main():
 
     print("[INFO] 텔레그램 로그인(세션) 준비 완료")
 
-    # (A) keep_alive : 10분 간격
+    # (A) keep_alive 주기적으로 실행
     async def keep_alive_scheduler():
         while True:
             await keep_alive()
             await asyncio.sleep(600)  # 10분
 
-    # (B) 메인 전송 루프와 keep_alive 스케줄 병행 실행
+    # (B) send_messages_loop + keep_alive_scheduler 병행
     await asyncio.gather(
         send_messages_loop(),
         keep_alive_scheduler()
     )
 
-# ========== [9] 실제 실행 ==========
+# ========== [10] 실행 ==========
 if __name__ == "__main__":
     asyncio.run(main())
