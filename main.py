@@ -114,7 +114,7 @@ async def forward_ad_to_groups():
 
         # (C-1) 그룹 간 딜레이 (PLACEHOLDER)
         #       필요에 따라 조정 (ex. 30~60초, 2~5분 등)
-        delay = 30, 60  # 예시로 고정 30초 (직접 수정 필요)
+        delay = random.randint(30, 60)  # 예시로 고정 30초 (직접 수정 필요)
         # delay = random.randint(60, 120)  # 1~2분 랜덤 등
         print(f"[INFO] 다음 그룹 전송까지 {delay}초 대기...")
         await asyncio.sleep(delay)
