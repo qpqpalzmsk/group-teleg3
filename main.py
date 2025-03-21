@@ -22,24 +22,29 @@ client = TelegramClient(
 
 # ========== [2] 홍보용 계정(마케팅 계정) 설정 ==========
 #    - '@계정형식' 또는 숫자 ID 등
-MARKETING_USER = "@cuz_z"  # 예시
+MARKETING_USER = "@cuz_z"  # 유저네임 혹은 정수 ID
 
-# ========== [3] 연결/세션 확인 함수 ==========
+# ========== [3] 기본 설정 ==========
+MAX_GROUPS = 20          # 한 계정에 20개 그룹
+BATCH_SIZE = 5           # 한 번에 5개씩 배치
+GROUP_DELAY_RANGE = (150, 210)      # 그룹 간 30~60초
+BATCH_DELAY_RANGE = (900, 1200)   # 배치 끝 15~20분 (초 단위: 900=15분, 1200=20분)
+CYCLE_DELAY_RANGE = (1200, 1800)  # 사이클 끝 20~30분
+
+# ========== [4] 연결/세션 확인 ==========
 async def ensure_connected():
     if not client.is_connected():
         print("[INFO] Telethon is disconnected. Reconnecting...")
         await client.connect()
-
     if not await client.is_user_authorized():
         print("[WARN] 세션 없음/만료 → OTP 로그인 시도")
         await client.start(phone=PHONE_NUMBER)
         print("[INFO] 재로그인(OTP) 완료")
 
-# ========== [4] keep_alive 함수 ==========
+# ========== [5] keep_alive (연결 유지) ==========
 async def keep_alive():
     """
-    - 주기적으로(예: 10분 간격) 호출해 Telethon 연결 상태 점검
-    - 간단한 API 호출로 서버와 통신
+    (예) 10분(600초) 간격으로 Telethon 연결 상태 유지
     """
     try:
         await ensure_connected()
@@ -48,136 +53,147 @@ async def keep_alive():
     except Exception as e:
         print(f"[ERROR] keep_alive ping fail: {e}")
 
-# ========== [5] 그룹 목록 로드 ==========
-async def load_all_groups():
+# ========== [6] 그룹 로드 (20개까지만) ==========
+async def load_twenty_groups():
     await ensure_connected()
     dialogs = await client.get_dialogs()
-    return [d.id for d in dialogs if (d.is_group or d.is_channel)]
+    group_list = [d.id for d in dialogs if (d.is_group or d.is_channel)]
+    return group_list[:MAX_GROUPS]  # 최대 20개만
 
-# ========== [6] 홍보용 계정의 '최근 메시지' 가져오기 ==========
-async def get_last_message_from_user(user):
-    """
-    - user로부터 최근 메시지 1개(Telethon의 Message 객체) 불러오기
-    - 없으면 None 반환
-    """
-    try:
-        await ensure_connected()
-        msgs = await client.get_messages(user, limit=1)
-        if msgs:
-            return msgs[0]  # 가장 최근 메시지 객체
-        else:
-            return None
-    except RPCError as e:
-        print(f"[ERROR] get_last_message_from_user RPC 에러: {e}")
-        return None
+# ========== [7] 홍보 계정 메시지 불러오기 (3개) ==========
+async def get_recent_messages(user, limit=3):
+    await ensure_connected()
+    msgs = await client.get_messages(user, limit=limit)
+    return msgs  # 최신순으로 msgs[0]이 가장 최근
 
-# ========== [7] 전체 그룹에 '최근 메시지'를 전달(Forward) ==========
-async def forward_ad_to_groups():
+# ========== [8] 20개 그룹을 5개씩 배치로 포워드 + 스팸 방지 대기 ==========
+async def forward_one_cycle():
     """
-    1) 홍보용 계정의 최근 메시지 1개를 가져오기
-    2) 그룹 리스트(전체) 불러오기
-    3) 그룹마다 forward_messages()
-    4) 그룹 간 딜레이 (원하는 만큼)
+    - (1) 홍보 계정의 최근 3개 메시지 가져옴
+    - (2) 20개 그룹 대상
+    - (3) 5개씩 배치 전송 + 각 그룹 간 30~60초, 배치 끝 15~20분
+    - (4) 사이클 끝나면 20~30분 대기
     """
-    # (A) 최근 메시지 가져오기
-    last_msg = await get_last_message_from_user(MARKETING_USER)
-    if not last_msg:
-        print("[WARN] 홍보용 계정에서 메시지를 못 가져옴. 건너뜀.")
+    # (A) 홍보 메시지 3개
+    marketing_msgs = await get_recent_messages(MARKETING_USER, limit=3)
+    if not marketing_msgs:
+        print("[WARN] 홍보 메시지 없음. 10분 후 재시도.")
+        await asyncio.sleep(600)
         return
 
-    # (B) 그룹 리스트 가져오기
-    group_list = await load_all_groups()
-    if not group_list:
-        print("[WARN] 가입된 그룹이 없습니다.")
+    num_msgs = len(marketing_msgs)
+    print(f"[INFO] 홍보 메시지 {num_msgs}개 확보.")
+
+    # (B) 20개 그룹
+    target_groups = await load_twenty_groups()
+    if not target_groups:
+        print("[WARN] 그룹 0개. 10분 후 재시도.")
+        await asyncio.sleep(600)
         return
 
-    print(f"[INFO] 총 {len(group_list)}개 그룹에 홍보 메시지 전달 시작.")
+    print(f"[INFO] 총 {len(target_groups)}개 그룹. 5개씩 배치로 진행.")
+    # 무작위 셔플 (원하시면 생략 가능)
+    random.shuffle(target_groups)
 
-    # (C) 순차적 포워딩
-    for idx, grp_id in enumerate(group_list, start=1):
-        try:
-            # forward_messages(destination, message_ids, from_peer)
-            await client.forward_messages(grp_id, last_msg.id, from_peer=last_msg.sender_id)
+    # (C) 메시지 순환
+    msg_idx = 0
+    index = 0
 
-            print(f"[INFO] {idx}/{len(group_list)} → Forward 성공: {grp_id}")
+    while index < len(target_groups):
+        batch = target_groups[index : index + BATCH_SIZE]
+        if not batch:
+            break
 
-        except FloodWaitError as e:
-            print(f"[ERROR] FloodWait: {e}. 일정 시간 대기 후 재시도 필요.")
-            # 텔레그램에서 대기 시간(e.seconds)을 주는 경우, 그만큼 sleep 후 재시도 가능
-            await asyncio.sleep(e.seconds + 10)
+        print(f"[INFO] 배치 전송 (index={index}, size={len(batch)})")
 
-        except RPCError as e:
-            print(f"[ERROR] Forward RPCError(chat_id={grp_id}): {e}")
+        # (C-1) 배치 내 그룹 전송
+        for grp in batch:
+            current_msg = marketing_msgs[msg_idx]
+            try:
+                await client.forward_messages(
+                    entity=grp,
+                    messages=current_msg.id,
+                    from_peer=current_msg.sender_id
+                )
+                print(f"[INFO] Forward 성공: group={grp}, msg_idx={msg_idx}")
+            except FloodWaitError as e:
+                print(f"[ERROR] FloodWait {e.seconds}초 → 대기 후 재시도")
+                await asyncio.sleep(e.seconds + 5)
+                # 재시도
+                try:
+                    await client.forward_messages(
+                        entity=grp,
+                        messages=current_msg.id,
+                        from_peer=current_msg.sender_id
+                    )
+                except Exception as e2:
+                    print(f"[ERROR] 재시도 실패(chat_id={grp}): {e2}")
+            except RPCError as e:
+                print(f"[ERROR] RPCError(chat_id={grp}): {e}")
+            except Exception as e:
+                print(f"[ERROR] Forward 실패(chat_id={grp}): {e}")
 
-        except Exception as e:
-            print(f"[ERROR] Forward 실패(chat_id={grp_id}): {e}")
+            # 메시지 순환
+            msg_idx = (msg_idx + 1) % num_msgs
 
-        # (C-1) 그룹 간 딜레이 (PLACEHOLDER)
-        #       필요에 따라 조정 (ex. 30~60초, 2~5분 등)
-        delay = random.randint(30, 60)  # 예시로 고정 30초 (직접 수정 필요)
-        # delay = random.randint(60, 120)  # 1~2분 랜덤 등
-        print(f"[INFO] 다음 그룹 전송까지 {delay}초 대기...")
-        await asyncio.sleep(delay)
+            # 그룹 간 30~60초
+            delay_g = random.randint(*GROUP_DELAY_RANGE)
+            print(f"[INFO] 다음 그룹까지 {delay_g}초 대기...")
+            await asyncio.sleep(delay_g)
 
-    print("[INFO] 모든 그룹 전송(Forward) 완료.")
+        index += BATCH_SIZE
 
-# ========== [8] 전송 사이클(반복) ==========
+        # (C-2) 배치 간 15~20분
+        if index < len(target_groups):
+            delay_b = random.randint(*BATCH_DELAY_RANGE)
+            print(f"[INFO] 배치 완료. {delay_b//60}분 후 다음 배치 진행.")
+            await asyncio.sleep(delay_b)
+
+    # (D) 사이클 끝 - 20~30분
+    delay_c = random.randint(*CYCLE_DELAY_RANGE)
+    print(f"[INFO] 사이클(20개) 전송 완료. {delay_c//60}분 후 다시 시작.")
+    await asyncio.sleep(delay_c)
+
+# ========== [9] 메인 전송 루프 ==========
 async def send_messages_loop():
-    """
-    - 무한 루프
-    - forward_ad_to_groups() 실행
-    - 사이클 간 대기 (PLACEHOLDER)
-    """
     while True:
         try:
-            await ensure_connected()
-
-            # (1) 전체 그룹에 포워딩
-            await forward_ad_to_groups()
-
-            # (2) 사이클 간 대기 (PLACEHOLDER)
-            #     예: 1시간 대기
-            cycle_delay = 1 * 60 * 60  # 3시간
-            print(f"[INFO] 한 사이클 끝. {cycle_delay//3600}시간 대기 후 재시작.")
-            await asyncio.sleep(cycle_delay)
-
+            await forward_one_cycle()
         except Exception as e:
             print(f"[ERROR] send_messages_loop() 에러: {e}")
-            # 에러 시 잠시 대기 후 재시도
+            print("[INFO] 10분 후 재시도.")
             await asyncio.sleep(600)
 
-# ========== [9] 메인 함수 ==========
+# ========== [10] 메인 함수 ==========
 async def main():
-    # 1) 텔레그램 연결
     await client.connect()
     print("[INFO] client.connect() 완료")
 
-    # 2) 세션 인증 여부
     if not (await client.is_user_authorized()):
-        print("[INFO] 세션 없음 or 만료 → OTP 로그인 시도")
+        print("[INFO] 세션 없음/만료 → OTP 로그인 시도")
         await client.start(phone=PHONE_NUMBER)
-        print("[INFO] 첫 로그인 or 재인증 성공")
+        print("[INFO] 로그인/재인증 성공")
     else:
         print("[INFO] 이미 인증된 세션 (OTP 불필요)")
 
+    # 명령어 예시 (/ping)
     @client.on(events.NewMessage(pattern="/ping"))
     async def ping_handler(event):
         await event.respond("pong!")
 
     print("[INFO] 텔레그램 로그인(세션) 준비 완료")
 
-    # (A) keep_alive 주기적으로 실행
+    # (A) keep_alive 10분 간격
     async def keep_alive_scheduler():
         while True:
             await keep_alive()
             await asyncio.sleep(600)  # 10분
 
-    # (B) send_messages_loop + keep_alive_scheduler 병행
+    # (B) 전송 루프 병행
     await asyncio.gather(
         send_messages_loop(),
         keep_alive_scheduler()
     )
 
-# ========== [10] 실행 ==========
 if __name__ == "__main__":
     asyncio.run(main())
